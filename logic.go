@@ -4,12 +4,14 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"github.com/MixinNetwork/bot-api-go-client"
 	"github.com/MixinNetwork/go-number"
-	"github.com/google/uuid"
+	"github.com/MixinNetwork/mixin/common"
+	"github.com/satori/go.uuid"
 	"github.com/skip2/go-qrcode"
 	"io"
 	"io/ioutil"
@@ -38,6 +40,14 @@ type (
 		Thumbnail    string `json:"thumbnail,omitempty"`
 	}
 
+	Operation struct {
+		Id     string
+		Type   uint8
+		Curve  uint8
+		Public string
+		Extra  []byte
+	}
+
 	mixinBlazeHandler func(ctx context.Context, msg bot.MessageView, clientID string) error
 
 	TrainClient struct {
@@ -46,6 +56,34 @@ type (
 		Client *bot.BlazeClient
 	}
 )
+
+func (o *Operation) Encode() []byte {
+	pub, err := hex.DecodeString(o.Public)
+	if err != nil {
+		panic(o.Public)
+	}
+	enc := common.NewEncoder()
+	writeUUID(enc, o.Id)
+	writeByte(enc, o.Type)
+	writeByte(enc, o.Curve)
+	writeBytes(enc, pub)
+	writeBytes(enc, o.Extra)
+	return enc.Bytes()
+}
+
+func writeUUID(enc *common.Encoder, id string) {
+	uid := uuid.FromStringOrNil(id)
+	enc.Write(uid.Bytes())
+}
+
+func writeByte(enc *common.Encoder, b byte) {
+	_ = enc.WriteByte(b)
+}
+
+func writeBytes(enc *common.Encoder, bytes []byte) {
+	_ = enc.WriteByte(byte(len(bytes)))
+	enc.Write(bytes)
+}
 
 const (
 	cnbAssetId = "965e5c6e-434c-3fa9-b780-c50f43cd955c"
@@ -115,6 +153,54 @@ func (t *TrainClient) HandleDonate(ctx context.Context, userId string) {
 	t.Client.SendAppButton(ctx, bot.UniqueConversationId(userId, t.Config.ClientId), userId, "点我打赏", transferAction, "#000000")
 }
 
+func (t *TrainClient) AccountProposal(ctx context.Context, userId string) {
+	id := uuid.NewV4()
+	op := &Operation{
+		Id:     id.String(), // as a tranceId
+		Type:   110,
+		Curve:  1,
+		Public: "0390dd88700acf900850b9d7760c4ff52b552c586ae8cbe6dcb9b25343eec95c2d",
+	}
+	threshold := byte(1)
+	total := byte(1)
+	geb := "193efbc5-e5df-4a55-9d46-fe1ec4347def"
+	owners := []string{geb}
+	extra := []byte{threshold, total}
+	uid := uuid.FromStringOrNil(owners[0])
+	op.Extra = append(extra, uid.Bytes()...)
+	memo := base64.RawURLEncoding.EncodeToString(op.Encode())
+
+	fmt.Println(id.String(), " as traceId, memo: ", memo)
+	if userId != geb {
+		t.SendTextMsg(ctx, userId, "not valid user for proposal. "+memo)
+		return
+	}
+
+	botIn := &bot.TransferInput{
+		AssetId: "c6d0c728-2624-429b-8e0d-d9d19b6592fa",
+		Amount:  number.FromFloat(0.0001),
+		TraceId: op.Id,
+		Memo:    memo,
+	}
+	botIn.OpponentMultisig.Receivers = []string{
+		"71b72e67-3636-473a-9ee4-db7ba3094057", // 7000103394 Calculator
+		"148e696f-f1db-4472-a907-ceea50c5cfde", // 7000100092 EOS Mapping
+		"c9a9a719-4679-4057-bcf0-98945ed95a81", // 7000100108 Mixin Logs
+		"b45dcee0-23d7-4ad1-b51e-c681a257c13e", // 7000103006 Mornin
+		"fcb87491-4fa0-4c2f-b387-262b63cbc112", // humanDong
+	}
+	botIn.OpponentMultisig.Threshold = 4
+	transaction, err := bot.CreateMultisigTransaction(ctx, botIn, t.Config.ClientId, t.Config.SessionId, t.Config.PrivateKey, t.Config.Pin, t.Config.PinToken)
+	if err != nil {
+		fmt.Println("transFailed ", err.Error())
+		return
+	}
+	indent, err := json.MarshalIndent(transaction, "", "  ")
+	fmt.Println("transResult: ", string(indent))
+	t.SendTextMsg(ctx, userId, "curl https://safe.mixin.dev/accounts/"+id.String())
+
+}
+
 func (t *TrainClient) HelpMsgWithInfo(ctx context.Context, userId, info string) {
 	t.SendTextMsg(ctx, userId, info+helpMsg)
 	t.Client.SendAppButton(ctx, bot.UniqueConversationId(userId, t.Config.ClientId), userId, "签到", "input:/claim", "#1DDA99")
@@ -153,7 +239,7 @@ func (t *TrainClient) HandleAssets(ctx context.Context, userId, data string) boo
 
 func (t *TrainClient) SendTextMsg(ctx context.Context, userId, content string) {
 	uniqueCid := bot.UniqueConversationId(userId, t.Config.ClientId)
-	t.Client.SendMessage(ctx, uniqueCid, userId, uuid.New().String(), bot.MessageCategoryPlainText, content, "")
+	t.Client.SendMessage(ctx, uniqueCid, userId, uuid.NewV4().String(), bot.MessageCategoryPlainText, content, "")
 }
 
 func (t *TrainClient) HandleUser(ctx context.Context, userId, data string) bool {
@@ -209,7 +295,7 @@ func (t *TrainClient) HandleUser(ctx context.Context, userId, data string) bool 
 	if err != nil {
 		fmt.Println(err)
 	}
-	err = t.Client.SendMessage(ctx, uniqueCid, userId, uuid.New().String(), bot.MessageCategoryPlainImage, string(byteImg), "")
+	err = t.Client.SendMessage(ctx, uniqueCid, userId, uuid.NewV4().String(), bot.MessageCategoryPlainImage, string(byteImg), "")
 	if err != nil {
 		fmt.Println(err)
 		return false
@@ -246,7 +332,7 @@ func UploadAttachmentTo(uploadURL string, file []byte) error {
 }
 
 func IsValidUUID(u string) bool {
-	_, err := uuid.Parse(u)
+	_, err := uuid.FromString(u)
 	return err == nil
 }
 
@@ -315,6 +401,11 @@ func handler(ctx context.Context, botMsg bot.MessageView, clientID string) error
 
 	if data == "/donate" {
 		mars.HandleDonate(ctx, botMsg.UserId)
+		return nil
+	}
+
+	if data == "/proposal" {
+		mars.AccountProposal(ctx, botMsg.UserId)
 		return nil
 	}
 
